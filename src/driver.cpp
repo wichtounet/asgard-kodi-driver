@@ -9,11 +9,8 @@
 
 namespace {
 
-// Configuration (this should be in a configuration file)
-const char* server_socket_path = "/tmp/asgard_socket";
-const char* client_socket_path = "/tmp/asgard_kodi_socket";
-const std::size_t delay_ms = 5000;
-const std::string kodi_server = "192.168.20.102:8010";
+// Configuration
+std::vector<asgard::KeyValue> config;
 
 asgard::driver_connector driver;
 
@@ -31,9 +28,6 @@ void stop(){
     asgard::unregister_action(driver, source_id, play_action_id);
     asgard::unregister_source(driver, source_id);
 
-    // Unlink the client socket
-    unlink(client_socket_path);
-
     // Close the socket
     close(driver.socket_fd);
 }
@@ -44,7 +38,7 @@ void terminate(int){
     std::exit(0);
 }
 
-bool web_request(const std::string& json_request){
+bool web_request(const std::string& kodi_server, const std::string& json_request){
     auto http_request = "http://" + kodi_server + json_request;
 
     auto result = asgard::exec_command("wget -O - '" + http_request + "' 2>&1");
@@ -60,10 +54,15 @@ bool web_request(const std::string& json_request){
 } //End of anonymous namespace
 
 int main(){
+    // Load the configuration file
+    asgard::load_config(config);
+
     // Open the connection
-    if(!asgard::open_driver_connection(driver, client_socket_path, server_socket_path)){
+    if(!asgard::open_driver_connection(driver, asgard::get_string_value(config, "server_socket_addr").c_str(), asgard::get_int_value(config, "server_socket_port"))){
         return 1;
     }
+
+    auto kodi_server = asgard::get_string_value(config, "kodi_server");
 
     // Register signals for "proper" shutdown
     signal(SIGTERM, terminate);
@@ -77,26 +76,28 @@ int main(){
 
     // Listen for messages from the server
     while(true){
-        socklen_t address_length              = sizeof(struct sockaddr_un);
-        auto bytes_received                   = recvfrom(driver.socket_fd, driver.receive_buffer, asgard::buffer_size, 0, (struct sockaddr*)&driver.server_address, &address_length);
-        driver.receive_buffer[bytes_received] = '\0';
+        if(asgard::receive_message(driver.socket_fd, driver.receive_buffer, asgard::buffer_size)){
+            std::string message(driver.receive_buffer);
+            std::stringstream message_ss(message);
 
-        std::string message(driver.receive_buffer);
-        std::stringstream message_ss(message);
+            std::string command;
+            message_ss >> command;
 
-        std::string command;
-        message_ss >> command;
+            if(command == "ACTION"){
+                std::string action;
+                message_ss >> action;
 
-        if(command == "ACTION"){
-            std::string action;
-            message_ss >> action;
-
-            if(action == "play"){
-                web_request("/jsonrpc?request={\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"Player.PlayPause\",\"params\":{\"playerid\":0}}");
-            } else if(action == "next"){
-                web_request("/jsonrpc?request={\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"Player.GoTo\",\"params\":{\"playerid\":0,\"to\":\"next\"}}");
-            } else if(action == "previous"){
-                web_request("/jsonrpc?request={\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"Player.GoTo\",\"params\":{\"playerid\":0,\"to\":\"previous\"}}");
+                if(action == "play"){
+                    web_request(kodi_server, "/jsonrpc?request={\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"Player.PlayPause\",\"params\":{\"playerid\":0}}");
+                } else if(action == "next"){
+                    web_request(kodi_server, "/jsonrpc?request={\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"Player.GoTo\",\"params\":{\"playerid\":0,\"to\":\"next\"}}");
+                } else if(action == "previous"){
+                    web_request(kodi_server, "/jsonrpc?request={\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"Player.GoTo\",\"params\":{\"playerid\":0,\"to\":\"previous\"}}");
+                } else {
+                    std::cout << "asgard:echo: unknown action: " << action << std::endl;
+                }
+            } else {
+                std::cout << "asgard:echo: unknown command: " << command << std::endl;
             }
         }
     }
